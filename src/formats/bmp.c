@@ -88,112 +88,94 @@ unsigned char *bmp_parse_pixels(FILE *fptr,
     } else {
         paddedRowSize = ((header->bitCount * width + 31) / 32) * 4;
     }
-    unsigned char *rowData = malloc(paddedRowSize);
-    if (rowData == NULL) {
-        gj_set_error("Failed to allocate memory for bmp row buffer\n");
-        free(pixels);
-        return NULL;
+
+    size_t totalSize = (size_t)paddedRowSize * height;
+    unsigned char *allData = malloc(totalSize);
+    if (!allData) {
+        gj_set_error("Failed to allocate memory for bmp read buffer\n");
+        goto fail;
     }
 
-    int actualRowSize = header->width * channels;
+    int actualRowSize = width * channels;
+
+    unsigned char palette[256][4];
+    int paletteSize = 0;
+
     if (header->bitCount == 8) {
         long paletteStart = sizeof(struct bmp_file_header) + header->size;
         long paletteEnd   = file_header->offset;
-        int paletteSize = (paletteEnd - paletteStart) / 4;
+        paletteSize = (paletteEnd - paletteStart) / 4;
+
         if (paletteSize <= 0 || paletteSize > 256) {
             gj_set_error("Invalid bmp palette size\n");
-            free(pixels);
-            free(rowData);
-            return NULL;
+            goto fail;
         }
-        unsigned char palette[256][4]; // BGRX, X = reserved
-        fseek(fptr,
-              sizeof(struct bmp_file_header) + header->size,
-              SEEK_SET);
+
+        fseek(fptr, paletteStart, SEEK_SET);
 
         if (fread(palette, 4, paletteSize, fptr) != (size_t)paletteSize) {
             gj_set_error("Failed to read bmp palette\n");
-            free(pixels);
-            free(rowData);
-            return NULL;
+            goto fail;
         }
-        fseek(fptr, file_header->offset, SEEK_SET);
-        for (int i = 0; i < height; ++i) {
-            int dstRow = (header->height > 0)
-                ? (height - 1 - i)  // bottom-up
-                : i;                // top-down
-            if (fread(rowData, paddedRowSize, 1, fptr) != 1) {
-                gj_set_error("Failed to read bmp pixel row data\n");
-                free(pixels);
-                free(rowData);
-                return NULL;
-            }
+    }
 
-            // int dstRow = header->height - 1 - i;
+    fseek(fptr, file_header->offset, SEEK_SET);
+
+    if (fread(allData, 1, totalSize, fptr) != totalSize) {
+        gj_set_error("Failed to read bmp pixel data\n");
+        goto fail;
+    }
+
+    for (int i = 0; i < height; ++i) {
+        int dstRow = (header->height > 0)
+            ? (height - 1 - i) // bottom-up
+            : i;               // top-down
+
+        unsigned char *rowData = allData + i * paddedRowSize;
+        unsigned char *dst = pixels + dstRow * actualRowSize;
+
+        if (header->bitCount == 8) {
             unsigned char *src = rowData;
-            unsigned char *dst = pixels + dstRow * actualRowSize;
-
-            for (int j = 0; j < header->width; ++j) {
+            for (int j = 0; j < width; ++j) {
                 unsigned char idx = *src++;
-                /* REMOVED for performance
-                if (idx >= paletteSize) {
-                    gj_set_error("Palette index out of range\n");
-                    free(pixels);
-                    free(rowData);
-                    return NULL;
-                }
-                */
-                
-                *dst++ = palette[idx][2]; // R
-                *dst++ = palette[idx][1]; // G
-                *dst++ = palette[idx][0]; // B
+                *dst++ = palette[idx][2];
+                *dst++ = palette[idx][1];
+                *dst++ = palette[idx][0];
             }
         }
-    } else {
-        for (int i = 0; i < height; ++i) {
-            if (fread(rowData, paddedRowSize, 1, fptr) != 1) {
-                gj_set_error("Failed to read bmp pixel row data\n");
-                free(pixels);
-                free(rowData);
-                return NULL;
+        // 2 branches + 2 for loops 
+        // instead of 1 for loop + 2 branched 
+        // for performance 
+
+        // Convert BGR(A) to RGB(A)
+        else if (channels == 3) {
+            unsigned char *src = rowData;
+            for (int j = 0; j < width; ++j) {
+                *dst++ = src[2];
+                *dst++ = src[1];
+                *dst++ = src[0];
+                src += 3;
             }
-            int dstRow = (header->height > 0)
-                ? (height - 1 - i)  // bottom-up
-                : i;                // top-down
-
-            unsigned char *dst = pixels + dstRow * actualRowSize;
-
-            // 2 branches + 2 for loops
-            // instead of 1 for loop + 2 branched
-            // for performance
-
-            // Convert BGR(A) to RGB(A)
-            if (channels == 3) {
-                unsigned char *src = rowData;
-                for (int j = 0; j < width; ++j) {
-                    *dst++ = src[2];
-                    *dst++ = src[1];
-                    *dst++ = src[0];
-
-                    src += 3;
-                }
-            }
-            else if (channels == 4) {
-                unsigned char *src = rowData;
-                for (int j = 0; j < width; ++j) {
-                    *dst++ = src[2];
-                    *dst++ = src[1];
-                    *dst++ = src[0];
-                    *dst++ = src[3];
-
-                    src += 4;
-                }
+        }
+        else if (channels == 4) {
+            unsigned char *src = rowData;
+            for (int j = 0; j < width; ++j) {
+                *dst++ = src[2];
+                *dst++ = src[1];
+                *dst++ = src[0];
+                *dst++ = src[3];
+                src += 4;
             }
         }
     }
 
-    free(rowData);
+    free(allData);
     return pixels;
+
+fail:
+    free(allData);
+    free(pixels);
+    return NULL;
 }
 
 unsigned char *bmp_open(struct image_file *image_file) {
