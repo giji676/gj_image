@@ -4,6 +4,10 @@ CC = gcc
 # Output library
 NAME = libgj_image.a
 
+# Flags
+CFLAGS = -Wall -Wextra -O2 -Iinclude -Isrc
+LDFLAGS = -lX11
+
 # Directories
 SRC_DIR = src
 BUILD_DIR = build
@@ -11,21 +15,17 @@ TEST_DIR = src/test
 TEST_SRC = $(TEST_DIR)/test.c
 TEST_BIN = test
 
+# Find all source files (internal only)
 SRCS = $(shell find $(SRC_DIR) -name "*.c")
+
+# Object files (mirror structure in build/)
 OBJS = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
-CFLAGS_BASE   = -Wall -Wextra -Iinclude -Isrc -g
-CFLAGS_RELEASE = -O2
-CFLAGS_PROFILE = -O0 -pg
-
-LDFLAGS_BASE   = -lX11
-LDFLAGS_PROFILE = -pg
-
-# Default mode = release build
-CFLAGS  = $(CFLAGS_BASE) $(CFLAGS_RELEASE)
-LDFLAGS = $(LDFLAGS_BASE)
-
+# Default target
 all: $(NAME)
+
+test: $(NAME)
+	$(CC) $(CFLAGS) $(TEST_SRC) -L. -lgj_image $(LDFLAGS) -o $(TEST_BIN)
 
 # Build static library
 $(NAME): $(OBJS)
@@ -36,24 +36,13 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(NAME)
-	$(CC) $(CFLAGS_BASE) $(CFLAGS_RELEASE) $(TEST_SRC) -L. -lgj_image $(LDFLAGS_BASE) -o $(TEST_BIN)
-
-profile: clean
-	$(MAKE) CFLAGS="$(CFLAGS_BASE) $(CFLAGS_PROFILE)" \
-	        LDFLAGS="$(LDFLAGS_BASE) $(LDFLAGS_PROFILE)" \
-	        all
-
-	$(CC) $(CFLAGS_BASE) $(CFLAGS_PROFILE) $(TEST_SRC) \
-	    -L. -lgj_image $(LDFLAGS_BASE) $(LDFLAGS_PROFILE) \
-	    -o $(TEST_BIN)
-
+# Clean
 clean:
 	rm -rf $(BUILD_DIR)
 
 fclean: clean
-	rm -f $(NAME) $(TEST_BIN)
+	rm -f $(NAME)
 
 re: fclean all
 
-.PHONY: all test profile clean fclean re
+.PHONY: all clean fclean re
