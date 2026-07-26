@@ -21,9 +21,13 @@ unsigned char *gj_image_load(const char *filename, int *width, int *height, int 
     };
 
     if (strcasecmp(ext, ".bmp") == 0) {
-        return bmp_open(&image_file);
+        unsigned char *data = bmp_open(&image_file);
+        vflip(data, *width, *height, *channels);
+        return data;
     } else if (strcasecmp(ext, ".png") == 0) {
-        return png_open(&image_file);
+        unsigned char *data = png_open(&image_file);
+        vflip(data, *width, *height, *channels);
+        return data;
     } else {
         gj_set_error("Unsupported file format \"%s\"\n", ext);
         return NULL;
