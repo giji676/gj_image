@@ -17,16 +17,15 @@ int test_image(const char *filename, int display) {
 }
 
 int main() {
-    // test_image("assets/cv.bmp");
-    // real    0m0.950s
-    // user    0m0.946s
-    // sys     0m0.003s
+    // real    0m6.819s
+    // user    0m6.723s
+    // sys     0m0.096s
     for (int i = 0; i < 1; i++) {
         test_image("/home/giji/Programming/game-2/assets/backpack/diffuse.png", 1);
     }
-    for (int i = 0; i < 1; i++) {
-        test_image("/home/giji/Programming/game-2/assets/backpack/specular.png", 1);
-    }
+    // for (int i = 0; i < 1; i++) {
+    //     test_image("/home/giji/Programming/game-2/assets/backpack/specular.png", 1);
+    // }
 
     return 0;
 }

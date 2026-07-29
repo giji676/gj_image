@@ -119,40 +119,166 @@ int png_readIDAT(void *data, uint32_t length, struct png_IDAT *idat) {
     return 1;
 }
 
-int png_decodeFixedHuffmanSymbol(struct bitStream *ds, uint32_t *symbol) {
-    uint32_t peeked;
+/*
+ * Buffered bit access for the DEFLATE inner loop.
+ *
+ * These bypass bitstream_read/bitstream_peek so a Huffman code can be peeked
+ * and consumed without a call per bit. A fill that runs out of input leaves
+ * the missing high bits zero, which lets the decoder peek a fixed width
+ * everywhere and detect the truncation from buffer_left afterwards.
+ */
+static inline void png_fillBits(struct bitStream *ds, unsigned n) {
+    while (ds->buffer_left < n && ds->bytepos < ds->length) {
+        ds->bit_buffer |= (uint32_t)ds->data[ds->bytepos++] << ds->buffer_left;
+        ds->buffer_left += 8;
+    }
+}
 
-    // Peek up to 9 bits (max code length in fixed Huffman)
-    if (bitstream_peek(ds, 9, &peeked) != 0) {
-        return -1; // Error reading bits
+static inline uint32_t png_readBits(struct bitStream *ds, unsigned n) {
+    if (n == 0) return 0;
+
+    png_fillBits(ds, n);
+    uint32_t value = ds->bit_buffer & ((1u << n) - 1);
+
+    if (n <= ds->buffer_left) {
+        ds->bit_buffer >>= n;
+        ds->buffer_left -= n;
+    } else {
+        ds->bit_buffer = 0;
+        ds->buffer_left = 0;
+    }
+    return value;
+}
+
+/*
+ * Canonical Huffman decoding table.
+ *
+ * Codes of PNG_HUFF_FAST_BITS bits or fewer resolve in a single lookup:
+ * fast_length/fast_symbol are indexed by the next PNG_HUFF_FAST_BITS bits of
+ * the stream, so every possible bit pattern already holds its decoded symbol.
+ * Longer codes are rare and fall back to a canonical search over
+ * first_code/first_index/count, which costs one step per bit length rather
+ * than a scan of every symbol.
+ */
+#define PNG_HUFF_FAST_BITS   9
+#define PNG_HUFF_FAST_SIZE   (1u << PNG_HUFF_FAST_BITS)
+#define PNG_HUFF_MAX_BITS    15
+#define PNG_HUFF_MAX_SYMBOLS 288
+#define PNG_HUFF_INVALID     0xFFFFFFFFu
+
+struct png_huffman {
+    uint8_t  fast_length[PNG_HUFF_FAST_SIZE]; // 0 when no short code matches
+    uint16_t fast_symbol[PNG_HUFF_FAST_SIZE];
+    uint32_t first_code[PNG_HUFF_MAX_BITS + 1];
+    uint32_t first_index[PNG_HUFF_MAX_BITS + 1];
+    uint32_t count[PNG_HUFF_MAX_BITS + 1];
+    uint16_t sorted[PNG_HUFF_MAX_SYMBOLS];    // symbols ordered by code length
+    uint32_t max_length;
+};
+
+int png_huffmanBuild(struct png_huffman *huff, const uint8_t *lengths,
+                     uint32_t num_symbols) {
+    if (num_symbols > PNG_HUFF_MAX_SYMBOLS) {
+        gj_set_error("Too many Huffman symbols (%u)\n", num_symbols);
+        return -1;
     }
 
-    uint32_t rev7 = reverse_bits(peeked, 7);
-    if (rev7 <= 23) {                 // symbols 256–279 (7-bit codes)
-        *symbol = 256 + rev7;
-        bitstream_read(ds, 7, &peeked);
-        return 0;
+    uint32_t bl_count[PNG_HUFF_MAX_BITS + 1] = {0};
+    for (uint32_t i = 0; i < num_symbols; i++) {
+        if (lengths[i] > PNG_HUFF_MAX_BITS) {
+            gj_set_error("Huffman code length %u out of range\n", lengths[i]);
+            return -1;
+        }
+        bl_count[lengths[i]]++;
+    }
+    bl_count[0] = 0;
+
+    huff->first_code[0] = 0;
+    huff->first_index[0] = 0;
+    huff->count[0] = 0;
+    huff->max_length = 0;
+
+    uint32_t next_code[PNG_HUFF_MAX_BITS + 1] = {0};
+    uint32_t code = 0;
+    uint32_t index = 0;
+    int32_t unused = 1;
+
+    for (uint32_t len = 1; len <= PNG_HUFF_MAX_BITS; len++) {
+        unused = (unused << 1) - (int32_t)bl_count[len];
+        if (unused < 0) {
+            gj_set_error("Over-subscribed Huffman code\n");
+            return -1;
+        }
+
+        huff->first_code[len] = code;
+        huff->first_index[len] = index;
+        huff->count[len] = bl_count[len];
+        next_code[len] = code;
+
+        index += bl_count[len];
+        code = (code + bl_count[len]) << 1;
+        if (bl_count[len] > 0) huff->max_length = len;
     }
 
-    uint32_t rev8 = reverse_bits(peeked, 8);
-    if (rev8 >= 0x30 && rev8 <= 0xBF) {      // symbols 0–143 (8-bit codes)
-        *symbol = rev8 - 0x30;
-        bitstream_read(ds, 8, &peeked);
-        return 0;
-    } else if (rev8 >= 0xC0 && rev8 <= 0xC7) { // symbols 280–287 (8-bit codes)
-        *symbol = 280 + (rev8 - 0xC0);
-        bitstream_read(ds, 8, &peeked);
-        return 0;
+    memset(huff->fast_length, 0, sizeof(huff->fast_length));
+
+    for (uint32_t symbol = 0; symbol < num_symbols; symbol++) {
+        uint32_t len = lengths[symbol];
+        if (len == 0) continue;
+
+        uint32_t sym_code = next_code[len]++;
+        huff->sorted[huff->first_index[len] + (sym_code - huff->first_code[len])] =
+            (uint16_t)symbol;
+
+        if (len > PNG_HUFF_FAST_BITS) continue;
+
+        // The stream delivers a code most significant bit first, so the table
+        // index is the code reversed. Every index sharing those low `len` bits
+        // decodes to this symbol whatever the following bits turn out to be.
+        uint32_t reversed = reverse_bits(sym_code, len);
+        for (uint32_t i = reversed; i < PNG_HUFF_FAST_SIZE; i += 1u << len) {
+            huff->fast_length[i] = (uint8_t)len;
+            huff->fast_symbol[i] = (uint16_t)symbol;
+        }
     }
 
-    uint32_t rev9 = reverse_bits(peeked, 9);
-    if (rev9 >= 0x190 && rev9 <= 0x1FF) { // symbols 144–255 (9-bit codes)
-        *symbol = 144 + (rev9 - 0x190);
-        bitstream_read(ds, 9, &peeked);
-        return 0;
+    return 0;
+}
+
+uint32_t png_huffmanDecodeLong(struct bitStream *ds, const struct png_huffman *huff) {
+    if (huff->max_length <= PNG_HUFF_FAST_BITS) return PNG_HUFF_INVALID;
+
+    png_fillBits(ds, huff->max_length);
+    uint32_t wide = ds->bit_buffer & ((1u << huff->max_length) - 1);
+    uint32_t code = reverse_bits(wide, PNG_HUFF_FAST_BITS);
+
+    for (uint32_t len = PNG_HUFF_FAST_BITS + 1; len <= huff->max_length; len++) {
+        code = (code << 1) | ((wide >> (len - 1)) & 1);
+
+        uint32_t offset = code - huff->first_code[len];
+        if (offset < huff->count[len]) {
+            if (len > ds->buffer_left) return PNG_HUFF_INVALID;
+            ds->bit_buffer >>= len;
+            ds->buffer_left -= len;
+            return huff->sorted[huff->first_index[len] + offset];
+        }
     }
 
-    return -1;
+    return PNG_HUFF_INVALID;
+}
+
+static inline uint32_t png_huffmanDecodeSymbol(struct bitStream *ds,
+                                               const struct png_huffman *huff) {
+    png_fillBits(ds, PNG_HUFF_FAST_BITS);
+    uint32_t peeked = ds->bit_buffer & (PNG_HUFF_FAST_SIZE - 1);
+
+    uint32_t len = huff->fast_length[peeked];
+    if (len == 0) return png_huffmanDecodeLong(ds, huff);
+    if (len > ds->buffer_left) return PNG_HUFF_INVALID;
+
+    ds->bit_buffer >>= len;
+    ds->buffer_left -= len;
+    return huff->fast_symbol[peeked];
 }
 
 static const uint16_t dist_base[30] = {
@@ -193,172 +319,98 @@ static const uint8_t len_extra[29] = {
     5,5,5,5,            // 281-284
     0                   // 285
 };
-int png_lenFromSym(struct bitStream *ds, uint32_t symbol) {
-    if (symbol < 257) return -1;
-
-    int length = 0;
-    int index = symbol - 257;
-    uint32_t extra_val = 0;
-    if (len_extra[index] > 0) {
-        bitstream_read(ds, len_extra[index], &extra_val);
-    }
-    length = len_base[index] + extra_val;
-    return length;
-}
-
-int png_distFromSym(struct bitStream *ds, uint32_t symbol) {
-    if (symbol > 29) return -1;
-    uint32_t extra_val = 0;
-    if (dist_extra[symbol] > 0) {
-        bitstream_read(ds, dist_extra[symbol], &extra_val);
-    }
-    return dist_base[symbol] + extra_val;
-}
-
-uint32_t png_decodeSymbol(
-    struct bitStream *ds,
-    uint32_t *codes,
-    uint8_t *lengths,
-    uint32_t num_symbols,
-    uint32_t max_len
-) {
-    uint32_t code = 0;
-
-    for (uint32_t len = 1; len <= max_len; len++) {
-        uint32_t bit;
-        bitstream_read(ds, 1, &bit);
-        code = (code << 1) | bit;
-
-        // Check all symbols with this bit length
-        for (uint32_t i = 0; i < num_symbols; i++) {
-            if (lengths[i] == len && codes[i] == code) {
-                return i;  // Found the symbol!
-            }
-        }
-    }
-
-    return 0xFFFFFFFF; // Error: no match found
-}
-
-// Decode one symbol - works for both fixed and dynamic Huffman
-uint32_t png_decodeLlSymbol(struct bitStream *ds, int is_dynamic, 
-                            uint32_t *ll_codes, uint8_t *ll_lengths, uint32_t hlit) {
-    if (is_dynamic) {
-        return png_decodeSymbol(ds, ll_codes, ll_lengths, hlit, 15);
-    } else {
-        uint32_t symbol;
-        if (png_decodeFixedHuffmanSymbol(ds, &symbol) != 0) {
-            return 0xFFFFFFFF;
-        }
-        return symbol;
-    }
-}
-
-uint32_t decode_dist_symbol(struct bitStream *ds, int is_dynamic,
-                            uint32_t *dist_codes, uint8_t *dist_lengths, uint32_t hdist) {
-    if (is_dynamic) {
-        return png_decodeSymbol(ds, dist_codes, dist_lengths, hdist, 15);
-    } else {
-        uint32_t dist_sym;
-        bitstream_read(ds, 5, &dist_sym);
-        return reverse_bits(dist_sym, 5);
-    }
-}
-
 int png_huffmanDecode(struct bitStream *ds,
                       uint8_t *output,
                       size_t *output_pos,
-                      uint32_t expected,
-                      int is_dynamic,
-                      uint32_t *ll_codes, uint8_t *ll_lengths, uint32_t hlit,
-                      uint32_t *dist_codes, uint8_t *dist_lengths, uint32_t hdist) {
-    while (1) {
-        uint32_t symbol = png_decodeLlSymbol(ds, is_dynamic, ll_codes, ll_lengths, hlit);
+                      size_t expected,
+                      const struct png_huffman *ll,
+                      const struct png_huffman *dist) {
+    size_t pos = *output_pos;
 
-        // End of block
-        if (symbol == 256) {
-            return 0;
-        }
+    while (1) {
+        uint32_t symbol = png_huffmanDecodeSymbol(ds, ll);
 
         // Literal byte
         if (symbol < 256) {
-            if (*output_pos >= expected) {
+            if (pos >= expected) {
                 gj_set_error("Output buffer overflow\n");
-                return -1;
+                break;
             }
-            output[*output_pos] = (uint8_t)symbol;
-            (*output_pos)++;
+            output[pos++] = (uint8_t)symbol;
             continue;
+        }
+
+        // End of block
+        if (symbol == 256) {
+            *output_pos = pos;
+            return 0;
+        }
+
+        if (symbol > 285) {
+            gj_set_error("Unexpected symbol %u\n", symbol);
+            break;
         }
 
         // Length/distance pair (257-285)
-        if (symbol >= 257 && symbol <= 285) {
-            int length = png_lenFromSym(ds, symbol);
+        uint32_t index = symbol - 257;
+        uint32_t length = len_base[index] + png_readBits(ds, len_extra[index]);
 
-            uint32_t dist_sym = decode_dist_symbol(ds, is_dynamic, 
-                                                   dist_codes, dist_lengths, hdist);
-            int distance = png_distFromSym(ds, dist_sym);
+        uint32_t dist_sym = png_huffmanDecodeSymbol(ds, dist);
+        if (dist_sym > 29) {
+            gj_set_error("Invalid distance symbol %u\n", dist_sym);
+            break;
+        }
+        size_t distance = dist_base[dist_sym] + png_readBits(ds, dist_extra[dist_sym]);
 
-            if (*output_pos + length > expected) {
-                gj_set_error("Output buffer overflow\n");
-                return -1;
-            }
-            for (int i = 0; i < length; i++) {
-                if (distance <= 0 || distance > *output_pos) {
-                    gj_set_error("Invalid distance\n");
-                    return -1;
-                }
-                output[*output_pos] = output[*output_pos - distance];
-                (*output_pos)++;
-            }
-            continue;
+        if (distance == 0 || distance > pos) {
+            gj_set_error("Invalid distance\n");
+            break;
+        }
+        if (length > expected - pos) {
+            gj_set_error("Output buffer overflow\n");
+            break;
         }
 
-        gj_set_error("Unexpected symbol %u\n", symbol);
-        return -1;
+        // Must stay byte at a time: the run may overlap itself when the
+        // distance is shorter than the length.
+        const uint8_t *src = output + pos - distance;
+        uint8_t *dst = output + pos;
+        for (uint32_t i = 0; i < length; i++) {
+            dst[i] = src[i];
+        }
+        pos += length;
     }
 
-    gj_set_error("Unexpected return from huffmanDecode\n");
-    return 0;
+    *output_pos = pos;
+    return -1;
 }
 
-void png_buildCanonicalHuffman(uint8_t *lengths, uint32_t num_symbols,
-                               uint32_t *codes, uint32_t max_bits) {
-    uint32_t bl_count[16] = {0};
-
-    // Count codes of each length
-    for (uint32_t i = 0; i < num_symbols; i++) {
-        if (lengths[i] > 0) {
-            bl_count[lengths[i]]++;
-        }
-    }
-
-    // Find first code for each length
-    uint32_t next_code[16] = {0};
-    uint32_t code = 0;
-    for (uint32_t bits = 1; bits <= max_bits; bits++) {
-        code = (code + bl_count[bits - 1]) << 1;
-        next_code[bits] = code;
-    }
-
-    // Assign codes to symbols
-    for (uint32_t i = 0; i < num_symbols; i++) {
-        uint32_t len = lengths[i];
-        if (len > 0) {
-            codes[i] = next_code[len];
-            next_code[len]++;
-        }
-    }
+void png_fixedCodeLengths(uint8_t *ll_lengths, uint8_t *dist_lengths) {
+    uint32_t i = 0;
+    for (; i < 144; i++) ll_lengths[i] = 8;
+    for (; i < 256; i++) ll_lengths[i] = 9;
+    for (; i < 280; i++) ll_lengths[i] = 7;
+    for (; i < 288; i++) ll_lengths[i] = 8;
+    for (i = 0; i < 32; i++) dist_lengths[i] = 5;
 }
 
 int png_fixedHuffmanDecode(struct bitStream *ds, uint8_t *output,
-                           size_t *output_pos, uint32_t expected) {
-    return png_huffmanDecode(ds, output, output_pos, expected,
-                             0, NULL, NULL, 0, NULL, NULL, 0);
+                           size_t *output_pos, size_t expected) {
+    uint8_t ll_lengths[288];
+    uint8_t dist_lengths[32];
+    png_fixedCodeLengths(ll_lengths, dist_lengths);
+
+    struct png_huffman ll, dist;
+    if (png_huffmanBuild(&ll, ll_lengths, 288) != 0 ||
+        png_huffmanBuild(&dist, dist_lengths, 32) != 0) {
+        return -1;
+    }
+
+    return png_huffmanDecode(ds, output, output_pos, expected, &ll, &dist);
 }
 
 int png_dynamicHuffmanDecode(struct bitStream *ds, uint8_t *output,
-                             size_t *output_pos, uint32_t expected) {
+                             size_t *output_pos, size_t expected) {
     static const uint8_t cl_order[19] = {
         16, 17, 18, 0, 8, 7, 9, 6, 10, 5,
         11, 4, 12, 3, 13, 2, 14, 1, 15
@@ -379,8 +431,10 @@ int png_dynamicHuffmanDecode(struct bitStream *ds, uint8_t *output,
     }
 
     // Build code-length tree
-    uint32_t codes[19];
-    png_buildCanonicalHuffman(cl_lengths, 19, codes, 8);
+    struct png_huffman cl;
+    if (png_huffmanBuild(&cl, cl_lengths, 19) != 0) {
+        return -1;
+    }
 
     // Decode literal/length and distance code lengths
     uint8_t ll_lengths[288] = {0};
@@ -390,8 +444,8 @@ int png_dynamicHuffmanDecode(struct bitStream *ds, uint8_t *output,
     uint8_t last_value = 0;
 
     while (decoded < total_codes) {
-        uint32_t symbol = png_decodeSymbol(ds, codes, cl_lengths, 19, 7);
-        if (symbol == 0xFFFFFFFF) {
+        uint32_t symbol = png_huffmanDecodeSymbol(ds, &cl);
+        if (symbol == PNG_HUFF_INVALID) {
             gj_set_error("Invalid Huffman symbol\n");
             return -1;
         }
@@ -426,21 +480,19 @@ int png_dynamicHuffmanDecode(struct bitStream *ds, uint8_t *output,
     }
 
     // Build literal/length and distance trees
-    uint32_t ll_codes[288];
-    uint32_t dist_codes[32];
-    png_buildCanonicalHuffman(ll_lengths, hlit, ll_codes, 16);
-    png_buildCanonicalHuffman(dist_lengths, hdist, dist_codes, 16);
+    struct png_huffman ll, dist;
+    if (png_huffmanBuild(&ll, ll_lengths, hlit) != 0 ||
+        png_huffmanBuild(&dist, dist_lengths, hdist) != 0) {
+        return -1;
+    }
 
-    // Decode using unified function
-    return png_huffmanDecode(ds, output, output_pos, expected,
-                             1, ll_codes, ll_lengths, hlit,
-                             dist_codes, dist_lengths, hdist);
+    return png_huffmanDecode(ds, output, output_pos, expected, &ll, &dist);
 }
 
 int png_nonCompressed(struct bitStream *ds,
                       uint8_t *output,
                       size_t *output_pos,
-                      uint32_t expected) {
+                      size_t expected) {
     uint32_t len, nlen;
     bitstream_align_byte(ds);
     bitstream_read(ds, 16, &len);

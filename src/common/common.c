@@ -96,8 +96,11 @@ int bitstream_peek(struct bitStream *bs, int n, uint32_t *out) {
 }
 
 void bitstream_align_byte(struct bitStream *bs) {
-    bs->bit_buffer = 0;
-    bs->buffer_left = 0;
+    /* Drop only the remainder of the current byte. Whole bytes already pulled
+     * into the buffer as read-ahead are still unconsumed input. */
+    uint8_t partial = bs->buffer_left & 7;
+    bs->bit_buffer >>= partial;
+    bs->buffer_left -= partial;
 }
 
 void bitstream_print(struct bitStream *bs) {
