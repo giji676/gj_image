@@ -1,6 +1,14 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "common/common.h"
+
+unsigned char flip = 0;
+
+void gj_vflip_image(unsigned char _flip) {
+    flip = _flip;
+}
 
 // Reverse the lowest n bits of x
 uint32_t reverse_bits(uint32_t x, int n) {
@@ -118,4 +126,20 @@ void bitstream_print(struct bitStream *bs) {
 
 int bitstream_get_size(struct bitStream *bs) {
     return bs->bytepos + (bs->buffer_left ? 1 : 0);
+}
+
+void vflip(unsigned char *data, int width, int height, int channels) {
+    if (!flip) return;
+
+    int row_size = channels * width;
+    unsigned char *tmp = malloc(channels * width);
+    if (!tmp) return;
+
+    for (int i = 0; i < height/2; i++) {
+        memcpy(tmp, data + row_size * i, row_size);
+        memcpy(data + row_size * i, data + row_size * (height - i - 1), row_size);
+        memcpy(data + row_size * (height - i - 1), tmp, row_size);
+    }
+
+    free(tmp);
 }

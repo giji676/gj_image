@@ -33,6 +33,13 @@ unsigned char *gj_image_load(const char *filename, int *width, int *height, int 
  */
 void           gj_image_free(unsigned char *data);
 
+/*
+ * Flip the image vertically if true.
+ *
+ * @param flip <1> if image should be flipped.
+ */
+void           gj_vflip_image(unsigned char flip);
+
 const char*    gj_get_last_error(void);
 
 #ifdef __cplusplus

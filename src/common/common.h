@@ -32,4 +32,6 @@ int bitstream_get_size(struct bitStream *bs);
 
 uint32_t reverse_bits(uint32_t x, int n);
 
+void vflip(unsigned char *data, int width, int height, int channels);
+
 #endif // COMMON_H
