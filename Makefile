@@ -6,7 +6,7 @@ ASM = gcc
 NAME = libgj_image.a
 
 # Flags
-CFLAGS   = -Wall -Wextra -O2 -Iinclude -Isrc -MMD -MP
+CFLAGS   = -Wall -Wextra -O3 -Iinclude -Isrc -MMD -MP
 ASMFLAGS = -x assembler -c
 
 LDFLAGS  = -lX11
