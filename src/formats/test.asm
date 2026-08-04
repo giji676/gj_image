@@ -340,7 +340,7 @@ padd_row_cont:
 
     xor %rax, %rax     # read
                        # arg 1: fd
-    lea 48(%rbp), %rsi # arg 2: address of buffer
+    lea -1072(%rbp), %rsi # arg 2: address of buffer
     movslq %ecx, %rdx  # arg 3: size of buffer - paletteSize * 4
     shl $2, %rdx       # paletteSize * 4
     syscall
@@ -359,7 +359,7 @@ skip_palette_load_v2:
     mov $8, %rax          # 8 - "lseek" syscall
                           # arg 1: fd
     mov 10(%rsi), %rdx
-    mov %edx, %rsi     # arg 2: offset
+    movslq %edx, %rsi     # arg 2: offset
     mov $0, %rdx          # arg 3: origin
     syscall
 
@@ -416,15 +416,15 @@ pixel_loop_8:
     movzbl (%r10), %r12d # idx = *rowData
     inc %r10             # rowData++
 
-    movb 50(%rbp,%r12,4), %al   # palette[idx][2]
+    movb -1070(%rbp,%r12,4), %al   # palette[idx][2]
     movb %al, (%r11)
     inc %r11
 
-    movb 49(%rbp,%r12,4), %al   # palette[idx][1]
+    movb -1071(%rbp,%r12,4), %al   # palette[idx][1]
     movb %al, (%r11)
     inc %r11
 
-    movb 48(%rbp,%r12,4), %al   # palette[idx][0]
+    movb -1072(%rbp,%r12,4), %al   # palette[idx][0]
     movb %al, (%r11)
     inc %r11
 
