@@ -310,14 +310,17 @@ padd_row_cont:
 
     # palette[256][4] = 1024
     sub $1024, %rsp
-    movzwl 14(%rdx), %eax      # load bitcount
+    movzwl 14(%rdx), %eax       # load bitcount
     cmp $8, %eax
     jne skip_palette_load_v2
-    mov $BITMAP_INFO_HEADER_SIZE, %eax
-    add 0(%rdx), %eax  # + header->size
 
     mov 10(%rsi), %ecx # file_header->offset
-    sub %eax, %ecx
+    push %rsi
+
+    mov $FILE_HEADER_SIZE, %esi # sizeof(bmp_file_header) + header->size
+    add 0(%rdx), %esi           # paletteStart
+
+    sub %esi, %ecx
     shr $2, %ecx       # paletteSize
 
     cmp $0, %ecx
@@ -325,26 +328,28 @@ padd_row_cont:
     cmp $256, %ecx
     jg err_invalid_palette
 
-    push %rsi
     push %rdx
+    push %rcx
 
     mov $8, %rax       # 8 - "lseek" syscall
                        # arg 1: fd
-    movslq %ecx, %rsi  # arg 2: offset
+    # %rsi             # arg 2: offset - paletteStart
     mov $0, %rdx       # arg 3: origin
     syscall
+    pop %rcx
 
     xor %rax, %rax     # read
                        # arg 1: fd
     lea 48(%rbp), %rsi # arg 2: address of buffer
-    movslq %ecx, %rdx  # arg 3: size of buffer
+    movslq %ecx, %rdx  # arg 3: size of buffer - paletteSize * 4
     shl $2, %rdx       # paletteSize * 4
     syscall
+
+    cmp %rdx, %rax
 
     pop %rdx
     pop %rsi
 
-    cmp %rdx, %rax
     jne err_file_read
 
 skip_palette_load_v2:
@@ -353,7 +358,8 @@ skip_palette_load_v2:
 
     mov $8, %rax          # 8 - "lseek" syscall
                           # arg 1: fd
-    mov 10(%rsi), %esi    # arg 2: offset
+    mov 10(%rsi), %rdx
+    mov %edx, %rsi     # arg 2: offset
     mov $0, %rdx          # arg 3: origin
     syscall
 
