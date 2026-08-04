@@ -1,5 +1,6 @@
 build/
 *.a
 *.o
+*.d
 *.json
 test
