@@ -32,15 +32,18 @@
 #                               // 40 total
 # };
 
-.equ WIDTH,           0
-.equ HEIGHT,          4
-.equ ABS_HEIGHT,      8
-.equ CHANNELS,        12
-.equ PIXELS,          16
-.equ ALL_DATA,        24
-.equ PADDED_ROW_SIZE, 32
-.equ TOTAL_SIZE,      36
-.equ ACTUAL_ROW_SIZE, 40
+.equ FILE_HEADER_SIZE, 14
+.equ BITMAP_INFO_HEADER_SIZE, 40
+
+.equ WIDTH,           -4  # 4
+.equ HEIGHT,          -8  # 4
+.equ ABS_HEIGHT,      -12 # 4
+.equ CHANNELS,        -16 # 4
+.equ PIXELS,          -24 # 8
+.equ ALL_DATA,        -32 # 8
+.equ PADDED_ROW_SIZE, -36 # 4
+.equ TOTAL_SIZE,      -40 # 4
+.equ ACTUAL_ROW_SIZE, -44 # 4
 
 # unsigned char *bmp_open_asm(struct image_file *);
 bmp_open_asm:
@@ -49,7 +52,10 @@ bmp_open_asm:
     push %r13
     push %r14
 
-    mov (%rdi), %rbx # save *filename into rbx
+    push %rbp
+    mov %rsp, %rbp
+
+    mov (%rdi), %rbx   # save *filename into rbx
     mov %rdi, %r14
 
     mov $2, %rax       # 2 - "open" syscall
@@ -62,89 +68,165 @@ bmp_open_asm:
 
     mov %rax, %r12     # save file descriptor to r12 (callee-save)
     # read bmp_file_header
-    mov $16, %r13      # keep track of total reserved (for cleanup)
+
     sub $16, %rsp      # reserve 16 bytes of memory
 
-    xor %rax, %rax     # read
-    mov %r12, %rdi     # file descriptor
-    mov %rsp, %rsi     # address of buffer
-    mov $14, %rdx      # size of buffer
-    syscall
+    mov %r12, %rdi     # arg 1: fd
+    lea -16(%rbp), %rsi     # arg 2: bmp_file_header pointer
+    call bmp_parse_file_header_asm
 
     test %rax, %rax
     jle err_file_read
 
-    movzwq (%rsp), %rax # load 2 bytes, zero extend to 64-bit
+    mov -16(%rbp), %ax  # load 2 bytes, zero extend to 64-bit
     cmp $0x4d42, %ax    # compare with 'B' 'M' signature (little endian)
-    jne not_bmp
-
-    # lea print_uint(%rip), %rdi # arg 1: format string
-    # mov 2(%rsp), %esi          # arg 2: buffer
-    # xor %eax, %eax
-    # call printf                # print size
-    #
-    # lea print_uint(%rip), %rdi # arg 1: format string
-    # mov 10(%rsp), %esi         # arg 2: buffer
-    # xor %eax, %eax
-    # call printf                # print offset
+    jne err_not_bmp
 
     # read bmp_bitmap_info_header
-    add $48, %r13      # keep track of total reserved (for cleanup)
     sub $48, %rsp      # reserve 48 bytes of memory
 
-    xor %rax, %rax     # read
-    mov %r12, %rdi     # file descriptor
-    mov %rsp, %rsi     # address of buffer
-    mov $40, %rdx      # size of buffer
-    syscall
+    mov %r12, %rdi      # arg 1: fd
+    lea -64(%rbp), %rsi
+    call bmp_parse_bitmap_info_header_asm
 
     test %rax, %rax
     jle err_file_read
 
-    # lea print_int(%rip), %rdi # arg 1: format string
-    # mov 0(%rsp), %esi         # arg 2: buffer
-    # xor %eax, %eax
-    # call printf               # print size
-    #
-    # lea print_int(%rip), %rdi # arg 1: format string
-    # mov 4(%rsp), %esi         # arg 2: buffer
-    # xor %eax, %eax
-    # call printf               # print width
-    #
-    # lea print_int(%rip), %rdi # arg 1: format string
-    # mov 8(%rsp), %esi         # arg 2: buffer
-    # xor %eax, %eax
-    # call printf               # print height
-
-    cmpl $0, 16(%rsp)          # header->compression =? 0
-    jne err_compression
-
-    mov $8, %rax       # 8 - "lseek" syscall
-    mov %r12, %rdi     # arg 1: fd
-    mov 10(%rsp), %rsi # arg 2: offset
-    mov $0, %rdx       # arg 3: origin
+    mov $8, %rax        # 8 - "lseek" syscall
+    mov %r12, %rdi      # arg 1: fd
+    mov -6(%rbp), %rsi # arg 2: offset
+    mov $0, %rdx        # arg 3: origin
     syscall
 
-    # lea print_uint(%rip), %rdi # arg 1: format string
-    # movzwl 14(%rsp), %esi      # arg 2: buffer
-    # xor %eax, %eax
-    # call printf                # print bitcount
+    mov %r12, %rdi      # arg 1: fd
+    lea -16(%rbp), %rsi # arg 2: bmp_file_header
+    lea -64(%rbp), %rdx # arg 3: bmp_bitmap_info_header
+    push %rdx
+    sub $8, %rsp        # for byte alignment
+    call bmp_parse_pixels_asm
+    add $8, %rsp
+    pop %rdx
+    mov %rax, %rbx      # save pixel pointer
+
+    mov 8(%r14), %rax   # load width pointer
+    # *image_file->width = value
+    # -72 + 4 = +68
+    mov 4(%rdx), %ecx   # load width value
+    mov %ecx, (%rax)    # store through pointer
+
+    mov 8(%rdx), %eax
+    mov %eax, %ecx
+    neg %eax
+    cmovl %ecx, %eax        # abs(height)
+    mov 16(%r14), %rcx      # load width pointer
+    mov %eax, (%rcx)        # store through pointer
 
     # 8=3, 24=3, 32=4
-    movzwl 14(%rsp), %esi      # load bitcount
-    # TODO: use CMOVcc (conditional move?)
+    movzwl 14(%rdx), %eax      # load bitcount
+check_8_:
+    cmp $8, %ax
+    jne check_24_
+    mov $3, %ecx
+    jmp continue_
+check_24_:
+    cmp $24, %ax
+    jne check_32_
+    mov $3, %ecx
+    jmp continue_
+check_32_:
+    cmp $32, %ax
+    jne default_
+    mov $4, %ecx
+    jmp continue_
+default_:
+    lea msg_unsupported_bitcount(%rip), %rdi
+    xor %eax, %eax
+    call printf
+    xor %eax, %eax
+    jmp cleanup
+continue_:
+    mov 24(%r14), %rax      # load width pointer
+    mov %ecx, (%rax)        # store through pointer
+
+    mov $3, %rax       # 3 - "close" syscall
+    mov $2, %rdi       # arg 1: fd - 2 - stderr
+    syscall
+
+    mov %rbx, %rax # moved saved pixel pointer to return %rax
+
+    jmp cleanup
+
+cleanup:
+    mov %rbp, %rsp
+    pop %rbp
+
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+
+    ret
+
+# int bmp_parse_file_header(FILE *, struct bmp_file_header *)
+bmp_parse_file_header_asm:
+    push %rbp
+    mov %rsp, %rbp
+
+    xor %rax, %rax # read
+    # %rdi         # file descriptor
+    # %rsi         # address of buffer
+    mov $14, %rdx  # size of buffer
+    syscall
+
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+# int bmp_parse_bitmap_info_header(FILE *, struct bmp_bitmap_info_header *)
+bmp_parse_bitmap_info_header_asm:
+    push %rbp
+    mov %rsp, %rbp
+
+    xor %rax, %rax # read
+    # %rdi         # file descriptor
+    # %rsi         # address of buffer
+    mov $40, %rdx  # size of buffer
+    syscall
+
+    cmpl $40, 0(%rsi)
+    je correct_bitmap_header_size
+    cmpl $124, 0(%rsi)
+    jne err_bitmap_header_size
+
+correct_bitmap_header_size:
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+# unsigned char *bmp_parse_pixels_asm(FILE *,
+#                struct bmp_file_header *,
+#                struct bmp_bitmap_info_header *)
+bmp_parse_pixels_asm:
+    push %rbp
+    mov %rsp, %rbp
+
+    cmpl $0, 16(%rdx)          # header->compression =? 0
+    jne err_compression
+
+    # 8=3, 24=3, 32=4
+    movzwl 14(%rdx), %eax      # load bitcount
 check_8:
-    cmp $8, %si
+    cmp $8, %ax
     jne check_24
     mov $3, %ecx
     jmp continue
 check_24:
-    cmp $24, %si
+    cmp $24, %ax
     jne check_32
     mov $3, %ecx
     jmp continue
 check_32:
-    cmp $32, %si
+    cmp $32, %ax
     jne default
     mov $4, %ecx
     jmp continue
@@ -155,182 +237,245 @@ default:
     xor %eax, %eax
     jmp cleanup
 continue:
-    # %ecx = channels
-    add $48, %r13      # keep track of total reserved (for cleanup)
-    sub $48, %rsp      # reserve 40 bytes of memory for variables
+    sub $48, %rsp      # reserve 48 bytes of memory for variables
+    mov %ecx, CHANNELS(%rbp)
 
-    mov %ecx, CHANNELS(%rsp)
+    mov 4(%rdx), %eax
+    mov %eax, WIDTH(%rbp)
 
-    mov 52(%rsp), %eax
-    mov %eax, WIDTH(%rsp)
+    mov 8(%rdx), %eax
+    mov %eax, HEIGHT(%rbp)
 
-    mov 56(%rsp), %eax
-    mov %eax, HEIGHT(%rsp)
-
-    mov 56(%rsp), %eax # height
-    mov %eax, %ebx
+    mov %eax, %ecx
     neg %eax
-    cmovl %ebx, %eax  # abs(height)
+    cmovl %ecx, %eax         # abs(height)
+    mov %eax, ABS_HEIGHT(%rbp)
 
-    mov %eax, ABS_HEIGHT(%rsp)
-
-    imul WIDTH(%rsp), %eax # width * height
-    mov CHANNELS(%rsp), %edi
-    imul %eax, %edi    # ^ * channels
+    sub $8, %rsp # % 16 byte alignment
+    push %rdi
+    push %rdx
+    push %rsi
+    imul WIDTH(%rbp), %eax   # width * height
+    mov CHANNELS(%rbp), %edi
+    imul %eax, %edi          # ^ * channels
 
     call malloc
+    pop %rsi
+    pop %rdx
+    pop %rdi
+    add $8, %rsp
     test %rax, %rax
     jz malloc_failed
-    mov %rax, PIXELS(%rsp)    # pointer to malloced pixel data
+    mov %rax, PIXELS(%rbp) # pointer to malloced pixel data
 
-    movzwl 62(%rsp), %eax # load bitcount
+    movzwl 14(%rdx), %eax  # load bitcount
     cmp $8, %eax
     jne padd_row_v2
-    mov WIDTH(%rsp), %eax  # (width + 3) & ~3
+    mov WIDTH(%rbp), %eax  # (width + 3) & ~3
     add $3, %eax
-    and $~3, %eax      # paddedRowSize
+    and $~3, %eax          # paddedRowSize
     jmp padd_row_cont
 padd_row_v2:
-    # lea print_uint(%rip), %rdi # arg 1: format string
-    # movzwl 62(%rsp), %esi      # arg 2: buffer
-    # xor %eax, %eax
-    # call printf                # print bitcount
-
-    movzwl 62(%rsp), %eax # load bitcount
-    imul WIDTH(%rsp), %eax # ((header->bitCount * width + 31) / 32) * 4;
+    movzwl 14(%rdx), %eax  # load bitcount
+    imul WIDTH(%rbp), %eax # ((header->bitCount * width + 31) / 32) * 4;
 
     add $31, %eax
     shr $5, %eax
     shl $2, %eax      # paddedRowSize
 
 padd_row_cont:
-    mov %eax, PADDED_ROW_SIZE(%rsp)
+    mov %eax, PADDED_ROW_SIZE(%rbp)
 
-    imul ABS_HEIGHT(%rsp), %eax   # totalSize
+    imul ABS_HEIGHT(%rbp), %eax   # totalSize
+    mov %eax, TOTAL_SIZE(%rbp)
 
-    mov %eax, TOTAL_SIZE(%rsp)
-
+    sub $8, %rsp
+    push %rdi
+    push %rdx
+    push %rsi
     mov %eax, %edi
     call malloc
+    pop %rsi
+    pop %rdx
+    pop %rdi
+    add $8, %rsp
     test %rax, %rax
     # TODO: if malloc failed free previous malloc PIXELS(%rsp)
     jz malloc_failed
-    mov %rax, ALL_DATA(%rsp) # pointer to malloced allData
+    mov %rax, ALL_DATA(%rbp) # pointer to malloced allData
 
-    mov WIDTH(%rsp), %eax
-    imul CHANNELS(%rsp), %eax   # actualRowSize
+    mov WIDTH(%rbp), %eax
+    imul CHANNELS(%rbp), %eax   # actualRowSize
+    mov %eax, ACTUAL_ROW_SIZE(%rbp)
 
-    mov %eax, ACTUAL_ROW_SIZE(%rsp)
+    # palette[256][4] = 1024
+    sub $1024, %rsp
+    movzwl 14(%rdx), %eax      # load bitcount
+    cmp $8, %eax
+    jne skip_palette_load_v2
+    mov $BITMAP_INFO_HEADER_SIZE, %eax
+    add 0(%rdx), %eax  # + header->size
 
-    movzwl 62(%rsp), %esi      # load bitcount
-    cmp $8, %si
-    jne skip_palette_load
-    # TODO: if (header->bitCount == 8) { ... }
-skip_palette_load:
+    mov 10(%rsi), %ecx # file_header->offset
+    sub %eax, %ecx
+    shr $2, %ecx       # paletteSize
+
+    cmp $0, %ecx
+    jle err_invalid_palette
+    cmp $256, %ecx
+    jg err_invalid_palette
+
+    push %rsi
+    push %rdx
+
     mov $8, %rax       # 8 - "lseek" syscall
-    mov %r12, %rdi     # arg 1: fd
-    # offset: 48+48+10 = 106
-    mov 106(%rsp), %esi # arg 2: offset
+                       # arg 1: fd
+    movslq %ecx, %rsi  # arg 2: offset
     mov $0, %rdx       # arg 3: origin
     syscall
 
     xor %rax, %rax     # read
-    mov %r12, %rdi     # file descriptor
-    mov ALL_DATA(%rsp), %rsi     # address of buffer
-    mov TOTAL_SIZE(%rsp), %rdx      # size of buffer
+                       # arg 1: fd
+    lea 48(%rbp), %rsi # arg 2: address of buffer
+    movslq %ecx, %rdx  # arg 3: size of buffer
+    shl $2, %rdx       # paletteSize * 4
     syscall
 
-    test %rax, %rax
-    jle err_file_read # TODO: free malloced memory
+    pop %rdx
+    pop %rsi
 
+    cmp %rdx, %rax
+    jne err_file_read
+
+skip_palette_load_v2:
+    push %rsi
+    push %rdx
+
+    mov $8, %rax          # 8 - "lseek" syscall
+                          # arg 1: fd
+    mov 10(%rsi), %esi    # arg 2: offset
+    mov $0, %rdx          # arg 3: origin
+    syscall
+
+    xor %rax, %rax     # read
+                       # arg 1: fd
+    mov ALL_DATA(%rbp), %rsi   # arg 2: address of buffer
+    mov TOTAL_SIZE(%rbp), %edx # arg 3: size of buffer
+    syscall
+
+    pop %rdx
+    pop %rsi
+
+    mov TOTAL_SIZE(%rbp), %ecx
+    cmp %rcx, %rax
+    jne err_file_read
+
+# CONT HERE
     xor %rcx, %rcx    # i = 0
-
 loop_i:
-    cmp ABS_HEIGHT(%rsp), %ecx
+    cmp ABS_HEIGHT(%rbp), %ecx
     jge end_loop_i
 
-    cmpl $0, HEIGHT(%rsp)
+    cmpl $0, HEIGHT(%rbp)
     jg bottom_up
-    mov %ecx, %eax # dstRow = i
+    movslq %ecx, %r9 # dstRow = i
     jmp dst_row
 bottom_up:
-    mov HEIGHT(%rsp), %eax
-    dec %eax
-    sub %ecx, %eax # dstRow = (height - 1 - i)
+    mov HEIGHT(%rbp), %r9d
+    dec %r9d
+    sub %ecx, %r9d # dstRow = (height - 1 - i)
     jmp dst_row
 dst_row:
-    movslq PADDED_ROW_SIZE(%rsp), %rsi
-    imul %rcx, %rsi
-    mov ALL_DATA(%rsp), %rdx
-    add %rsi, %rdx # *rowData = allData + i * paddedRowSize
+    mov PADDED_ROW_SIZE(%rbp), %r10d # paddedRowSize
+    imul %ecx, %r10d                 # i * paddedRowSize
+    add ALL_DATA(%rbp), %r10         # rowData = allData + i * paddedRowSize
 
-    movslq ACTUAL_ROW_SIZE(%rsp), %rsi
-    movslq %eax, %rax
-    imul %rax, %rsi
-    add PIXELS(%rsp), %rsi # *dst = pixels + dstRow * actualRowSize
+    mov ACTUAL_ROW_SIZE(%rbp), %r11d # actualRowSize
+    imul %r9d, %r11d                 # dstRow * actualRowSize
+    add PIXELS(%rbp), %r11           # dst = pixels + dstRow
 
-    cmpw $8, 62(%rsp) # if (header->bitCount == 8)
+    cmpw $8, 14(%rdx) # if (header->bitCount == 8)
     je bitcount_8
-    cmpl $3, CHANNELS(%rsp)
+    cmpl $3, CHANNELS(%rbp)
     je channels_3
-    cmpl $4, CHANNELS(%rsp)
+    cmpl $4, CHANNELS(%rbp)
     je channels_4
 
 bitcount_8:
-    # TODO
+    push %r12
+    xor %r8, %r8 # j = 0
+pixel_loop_8:
+    cmpl WIDTH(%rbp), %r8d
+    jge pixel_done_8
+    movzbl (%r10), %r12d # idx = *rowData
+    inc %r10             # rowData++
+
+    movb 50(%rbp,%r12,4), %al   # palette[idx][2]
+    movb %al, (%r11)
+    inc %r11
+
+    movb 49(%rbp,%r12,4), %al   # palette[idx][1]
+    movb %al, (%r11)
+    inc %r11
+
+    movb 48(%rbp,%r12,4), %al   # palette[idx][0]
+    movb %al, (%r11)
+    inc %r11
+
+    inc %r8 # j++
+    jmp pixel_loop_8
 
 channels_3:
-    # *src = rowData = %rdx
-    # *dst = %rsi
-    xor %rdi, %rdi # j = 0
+    xor %r8, %r8 # j = 0
 pixel_loop_3:
-    cmpl WIDTH(%rsp), %edi
+    cmpl WIDTH(%rbp), %r8d
     jge pixel_done_3
 
-    movb 2(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 2(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    movb 1(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 1(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    movb 0(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 0(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    add $3, %rdx
-    inc %rdi # j++
+    add $3, %r10
+    inc %r8 # j++
     jmp pixel_loop_3
 
 channels_4:
-    # *src = rowData = %rdx
-    # *dst = %rsi
     xor %rdi, %rdi # j = 0
 pixel_loop_4:
-    cmpl WIDTH(%rsp), %edi
-    jge pixel_done_4
+    cmpl WIDTH(%rbp), %r8d
+    jge pixel_done_3
 
-    movb 3(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    # load BGRA into RGBA
+    movb 2(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    movb 2(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 1(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    movb 1(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 0(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    movb 0(%rdx), %al
-    movb %al, (%rsi)
-    inc %rsi
+    movb 3(%r10), %al
+    movb %al, (%r11)
+    inc %r11
 
-    add $4, %rdx
-    inc %rdi # j++
+    add $4, %r10
+    inc %r8 # j++
     jmp pixel_loop_4
 
+pixel_done_8:
+    pop %r12
 pixel_done_3:
 pixel_done_4:
 cont_loop_i:
@@ -338,95 +483,24 @@ cont_loop_i:
     jmp loop_i
 
 end_loop_i:
-    mov ALL_DATA(%rsp), %rdi
+    mov ALL_DATA(%rbp), %rdi
     call free
 
-    mov 8(%r14), %rax       # load width pointer
-    # *image_file->width = value
-    mov WIDTH(%rsp), %ecx  # load width value
-    mov %ecx, (%rax)       # store through pointer
-
-    mov 16(%r14), %rax       # load width pointer
-    # *image_file->height = value
-    mov ABS_HEIGHT(%rsp), %ecx  # load width value
-    mov %ecx, (%rax)       # store through pointer
-
-    mov 24(%r14), %rax       # load width pointer
-    # *image_file->channels = value
-    mov CHANNELS(%rsp), %ecx  # load width value
-    mov %ecx, (%rax)       # store through pointer
-
-    mov $3, %rax       # 3 - "close" syscall
-    mov $2, %rdi       # arg 1: fd - 2 - stderr
-    syscall
-
-    mov PIXELS(%rsp), %rax # moved saved pixel pointer to return %rax
-    add %r13, %rsp         # restore aligment (total that was reserved)
-    jmp cleanup
-
-malloc_failed:
-    # TODO: close fd on any failures
-    mov $1, %rax       # 1 - "write" syscall
-    mov $2, %rdi       # arg 1: fd - 2 - stderr
-    lea msg_not_bmp(%rip), %rsi # arg 2: buffer
-    mov $22, %rdx      # arg 3: count
-    syscall
-
-    xor %eax, %eax    # return NULL
-    jmp cleanup
-
-not_bmp:
-    add %r13, %rsp    # restore aligment (total that was reserved)
-
-    mov $1, %rax       # 1 - "write" syscall
-    mov $2, %rdi       # arg 1: fg - 2 - stderr
-    lea msg_not_bmp(%rip), %rsi # arg 2: buffer
-    mov $22, %rdx      # arg 3: count
-    syscall
-
-    xor %eax, %eax     # return NULL
-    jmp cleanup
+    mov PIXELS(%rbp), %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
 
 err_file_open:
-    mov $1, %rax       # 1 - "write" syscall
-    mov $2, %rdi       # arg 1: fg - 2 - stderr
-    lea msg_err_file_open(%rip), %rsi # arg 2: buffer
-    mov $24, %rdx      # arg 3: count
-    syscall
-
-    xor %eax, %eax     # return NULL
-    jmp cleanup
-
 err_file_read:
-    add %r13, %rsp    # restore aligment (total that was reserved)
-
-    mov $1, %rax       # 1 - "write" syscall
-    mov $2, %rdi       # arg 1: fg - 2 - stderr
-    lea msg_err_read(%rip), %rsi # arg 2: buffer
-    mov $24, %rdx      # arg 3: count
-    syscall
-
-    xor %eax, %eax     # return NULL
-    jmp cleanup
-
+err_bitmap_header_size:
 err_compression:
-    add %r13, %rsp    # restore aligment (total that was reserved)
-
-    mov $1, %rax       # 1 - "write" syscall
-    mov $2, %rdi       # arg 1: fg - 2 - stderr
-    lea msg_err_compression(%rip), %rsi # arg 2: buffer
-    mov $35, %rdx      # arg 3: count
+err_not_bmp:
+err_invalid_palette:
+malloc_failed:
+    mov $60, %rax
+    mov $-1, %rdi
     syscall
-
-    xor %eax, %eax     # return NULL
-    jmp cleanup
-
-cleanup:
-    pop %r14
-    pop %r13
-    pop %r12
-    pop %rbx
-    ret
 
 .section .rodata
 print_uint:
@@ -441,6 +515,8 @@ msg_err_read:
     .string "error reading the file!\n" # 24 bytes
 msg_err_compression:
     .string "error compresed bmp not supported!\n" # 35 bytes
+msg_unsupported_bitmap_header_size:
+    .string "error unsuported bmp header type!\n" # 34 bytes
 msg_malloc_failed:
     .string "error malloc failed!\n" # 21 bytes
 msg_unsupported_bitcount:
