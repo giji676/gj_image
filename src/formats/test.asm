@@ -409,27 +409,38 @@ dst_row:
 
 bitcount_8:
     push %r12
-    xor %r8, %r8 # j = 0
+    mov WIDTH(%rbp), %r9d
+    test %r9d, %r9d
+    jz pixel_done_8
+    dec %r9d                 # width - 1
+    xor %r8, %r8             # j = 0
 pixel_loop_8:
-    cmpl WIDTH(%rbp), %r8d
-    jge pixel_done_8
-    movzbl (%r10), %r12d # idx = *rowData
-    inc %r10             # rowData++
+    cmpl %r9d, %r8d
+    jge pixel_last_8 # On last row exactly 3 bytes must be written
+    movzbl (%r10), %r12d
+    inc %r10
 
-    movb -1070(%rbp,%r12,4), %al   # palette[idx][2]
-    movb %al, (%r11)
-    inc %r11
+    movl -1072(%rbp,%r12,4), %eax  # BGRX
+    bswap %eax                     # XRGB
+    shrl $8, %eax                  # RGB0
+    movl %eax, (%r11)
+    add $3, %r11
 
-    movb -1071(%rbp,%r12,4), %al   # palette[idx][1]
-    movb %al, (%r11)
-    inc %r11
-
-    movb -1072(%rbp,%r12,4), %al   # palette[idx][0]
-    movb %al, (%r11)
-    inc %r11
-
-    inc %r8 # j++
+    inc %r8
     jmp pixel_loop_8
+
+pixel_last_8:
+    movzbl (%r10), %r12d
+    inc %r10
+
+    movl -1072(%rbp,%r12,4), %eax
+    bswap %eax
+    shrl $8, %eax
+    movw %ax, (%r11)         # R, G
+    shrl $16, %eax
+    movb %al, 2(%r11)        # B
+    add $3, %r11
+    jmp pixel_done_8
 
 channels_3:
     xor %r8, %r8 # j = 0
