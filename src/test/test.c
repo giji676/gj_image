@@ -1,6 +1,7 @@
 #include "test/display/display.h"
 #include "gj_image/gj_image.h"
 #include <stdio.h>
+#include <time.h>
 
 int test_image(const char *filename, int display) {
     int width, height, channels;
@@ -17,15 +18,13 @@ int test_image(const char *filename, int display) {
 }
 
 int main() {
-    // real    0m6.819s
-    // user    0m6.723s
-    // sys     0m0.096s
-    for (int i = 0; i < 1; i++) {
-        test_image("/home/giji/Programming/game-2/assets/backpack/diffuse.png", 1);
-    }
-    // for (int i = 0; i < 1; i++) {
-    //     test_image("/home/giji/Programming/game-2/assets/backpack/specular.png", 1);
-    // }
+    clock_t begin = clock();
+
+    test_image("/home/giji/Programming/gj-engine/assets/backpack/specular.png", 0);
+
+    clock_t end = clock();
+    double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+    printf("%f seconds\n", time_spent);
 
     return 0;
 }
