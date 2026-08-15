@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "common/common.h"
+#include "common/adler32_simd.h"
 #include "common/crc.h"
 #include "error/error.h"
 
@@ -529,7 +530,11 @@ uint8_t paeth_predictor(uint8_t a, uint8_t b, uint8_t c) {
     return c;
 }
 
-int png_compareAdler32(struct png_IDAT *idat, uint8_t *output, size_t output_pos) {
+int png_compareAdler32(uint32_t expected, uint8_t *output, size_t output_pos) {
+    uint32_t adler = 1; // initial adler state for adler32_simd_ implementation
+    // TODO: Change to use 0/1 or 0/-1 instead of 1/-1
+    return adler32_simd_(adler, output, output_pos) == expected ? 1 : -1;
+
     uint32_t a = 1;
     uint32_t b = 0;
 
@@ -539,7 +544,7 @@ int png_compareAdler32(struct png_IDAT *idat, uint8_t *output, size_t output_pos
     }
 
     uint32_t calculated_adler32 = (b << 16) | a;
-    if (calculated_adler32 != idat->adler32) {
+    if (calculated_adler32 != expected) {
         return -1;
     }
     return 1;
@@ -639,7 +644,7 @@ uint8_t *png_processIDAT(void *data, uint32_t length,
         return NULL;
     }
 
-    if (png_compareAdler32(&idat, output, output_pos) != 1) {
+    if (png_compareAdler32(idat.adler32, output, output_pos) != 1) {
         gj_set_error("Adler32 mismatch\n");
     }
 
