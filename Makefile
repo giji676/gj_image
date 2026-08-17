@@ -6,7 +6,7 @@ ASM = gcc
 NAME = libgj_image.a
 
 # Flags
-CFLAGS   = -Wall -Wextra -O3 -Iinclude -Isrc -MMD -MP
+CFLAGS   = -Wall -Wextra -Iinclude -Isrc -MMD -MP -O3
 ASMFLAGS = -x assembler -c
 
 LDFLAGS  = -lX11
@@ -20,11 +20,11 @@ TEST_BIN = test
 
 # Find all source files (internal only)
 SRC_C   = $(shell find $(SRC_DIR) -name "*.c")
-SRC_ASM = $(shell find $(SRC_DIR) -name "*.asm")
+SRC_ASM = $(shell find $(SRC_DIR) -name "*.s")
 
 # Object files (mirror structure in build/)
 OBJ_C   = $(SRC_C:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-OBJ_ASM = $(SRC_ASM:$(SRC_DIR)/%.asm=$(BUILD_DIR)/%.o)
+OBJ_ASM = $(SRC_ASM:$(SRC_DIR)/%.s=$(BUILD_DIR)/%.o)
 
 OBJ = $(OBJ_C) $(OBJ_ASM)
 
@@ -47,7 +47,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Compile ASM
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.asm
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.s
 	@mkdir -p $(dir $@)
 	$(ASM) $(ASMFLAGS) $< -o $@
 

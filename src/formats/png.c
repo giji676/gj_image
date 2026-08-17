@@ -520,6 +520,9 @@ int png_nonCompressed(struct bitStream *ds,
     return 0;
 }
 
+#include <immintrin.h>
+extern __m128i paeth_simd__m128i(uint64_t a, uint64_t b, uint64_t c);
+
 uint8_t paeth_predictor(uint8_t a, uint8_t b, uint8_t c) {
     int p = a + b - c;
     int pa = abs(p - a);
@@ -528,6 +531,15 @@ uint8_t paeth_predictor(uint8_t a, uint8_t b, uint8_t c) {
     if (pa <= pb && pa <= pc) return a;
     if (pb <= pc) return b;
     return c;
+}
+
+uint8_t paeth_predictor_stbi(uint8_t a, uint8_t b, uint8_t c) {
+    int thresh = c*3 - (a + b);
+    int lo = a < b ? a : b;
+    int hi = a < b ? b : a;
+    int t0 = (hi <= thresh) ? lo : c;
+    int t1 = (thresh <= lo) ? hi : t0;
+    return t1;
 }
 
 int png_compareAdler32(uint32_t expected, uint8_t *output, size_t output_pos) {
@@ -662,6 +674,11 @@ uint8_t *png_processIDAT(void *data, uint32_t length,
         int row_start = row * row_bytes;
         uint8_t filter = output[row_start];
 
+        uint64_t raws_64 = 0;
+        uint64_t a_64 = 0;
+        uint64_t b_64 = 0;
+        uint64_t c_64 = 0;
+
         for (int i = 0; i < width * channels; i++) {
             uint8_t raw = output[row_start + 1 + i];
             uint8_t recon;
@@ -670,13 +687,37 @@ uint8_t *png_processIDAT(void *data, uint32_t length,
             uint8_t up   = (row > 0)  ? final_output[idx - width * channels] : 0;
             uint8_t up_left =
                 (row > 0 && i >= channels) ? final_output[idx - width * channels - channels] : 0;
-
+            int case4 = 0;
+c:
             switch (filter) {
                 case 0: recon = raw; break;
                 case 1: recon = raw + left; break;
                 case 2: recon = raw + up; break;
                 case 3: recon = raw + ((left + up) >> 1); break;
-                case 4: recon = raw + paeth_predictor(left, up, up_left); break;
+                case 4: 
+                        case4 = 1;
+                        uint8_t ch = i % channels;
+                        raws_64 = (raws_64 << 16) | raw;
+                        a_64    = (a_64    << 16) | left;
+                        b_64    = (b_64    << 16) | up;
+                        c_64    = (c_64    << 16) | up_left;
+                        if (ch == channels - 1) {
+                            __m128i res = paeth_simd__m128i(a_64, b_64, c_64);
+                            int16_t values[4];
+                            _mm_storeu_si128((__m128i *)values, res);
+
+                            if (channels == 4) {
+                                final_output[idx-3] = ((uint8_t)(raws_64 >> 0))  + values[0];
+                                final_output[idx-2] = ((uint8_t)(raws_64 >> 16)) + values[1];
+                                final_output[idx-1] = ((uint8_t)(raws_64 >> 32)) + values[2];
+                                final_output[idx]   = ((uint8_t)(raws_64 >> 48)) + values[3];
+                            } else if (channels == 3) {
+                                final_output[idx-2] = ((uint8_t)(raws_64 >> 0))  + values[0];
+                                final_output[idx-1] = ((uint8_t)(raws_64 >> 16)) + values[1];
+                                final_output[idx]   = ((uint8_t)(raws_64 >> 32)) + values[2];
+                            }
+                        }
+                        break;
                 default:
                     gj_set_error("Unknown filter %u\n", filter);
                     free(output);
@@ -684,7 +725,10 @@ uint8_t *png_processIDAT(void *data, uint32_t length,
                     return NULL;
             }
 
-            final_output[idx++] = recon;
+            if (!case4)
+                final_output[idx++] = recon;
+            else
+                idx++;
         }
     }
 
