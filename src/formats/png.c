@@ -521,7 +521,7 @@ int png_nonCompressed(struct bitStream *ds,
 }
 
 #include <immintrin.h>
-extern __m128i paeth_simd__m128i(uint64_t a, uint64_t b, uint64_t c);
+extern __m128i paeth_simd__m128i(uint64_t a, uint64_t b, uint64_t c, uint64_t raw);
 
 uint8_t paeth_predictor(uint8_t a, uint8_t b, uint8_t c) {
     int p = a + b - c;
@@ -560,6 +560,131 @@ int png_compareAdler32(uint32_t expected, uint8_t *output, size_t output_pos) {
         return -1;
     }
     return 1;
+}
+
+int png_filter(int width, int height, int channels, uint8_t *final_output, uint8_t *output) {
+    int row_bytes = width * channels + 1;
+    int idx = 0;
+
+    uint64_t raw_64 = 0;
+    uint64_t a_64 = 0;
+    uint64_t b_64 = 0;
+    uint64_t c_64 = 0;
+
+    for (int row = 0; row < height; row++) {
+        int row_start = row * row_bytes;
+        uint8_t filter = output[row_start];
+
+        switch (filter) {
+            case 0:
+                memcpy(final_output + idx, output + row_start + 1, width * channels);
+                idx += width * channels;
+                break;
+            case 1:
+                for (int i = 0; i < width * channels; i += channels) {
+                    raw_64 =
+                          ((uint64_t)output[row_start + 1 + i + 0] <<  0)
+                        | ((uint64_t)output[row_start + 1 + i + 1] << 16)
+                        | ((uint64_t)output[row_start + 1 + i + 2] << 32);
+                    a_64 =
+                          ((uint64_t)((i + 0 >= channels) ? final_output[idx - channels + 0] : 0) <<  0)
+                        | ((uint64_t)((i + 1 >= channels) ? final_output[idx - channels + 1] : 0) << 16)
+                        | ((uint64_t)((i + 2 >= channels) ? final_output[idx - channels + 2] : 0) << 32);
+
+                    uint64_t res = a_64 + raw_64;
+
+                    final_output[idx+0] = (uint8_t)(res);
+                    final_output[idx+1] = (uint8_t)(res >> 16);
+                    final_output[idx+2] = (uint8_t)(res >> 32);
+
+                    idx += channels;
+                }
+                break;
+            case 2:
+                for (int i = 0; i < width * channels; i += channels) {
+                    raw_64 =
+                          ((uint64_t)output[row_start + 1 + i + 0] <<  0)
+                        | ((uint64_t)output[row_start + 1 + i + 1] << 16)
+                        | ((uint64_t)output[row_start + 1 + i + 2] << 32);
+
+                    b_64 =
+                          ((uint64_t)((row > 0) ? final_output[idx - width * channels + 0] : 0) <<  0)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 1] : 0) << 16)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 2] : 0) << 32);
+
+                    uint64_t res = b_64 + raw_64;
+
+                    final_output[idx+0] = (uint8_t)(res);
+                    final_output[idx+1] = (uint8_t)(res >> 16);
+                    final_output[idx+2] = (uint8_t)(res >> 32);
+
+                    idx += channels;
+                }
+                break;
+            case 3:
+                for (int i = 0; i < width * channels; i += channels) {
+                    raw_64 =
+                          ((uint64_t)output[row_start + 1 + i + 0] <<  0)
+                        | ((uint64_t)output[row_start + 1 + i + 1] << 16)
+                        | ((uint64_t)output[row_start + 1 + i + 2] << 32);
+
+                    a_64 =
+                          ((uint64_t)((i >= channels) ? final_output[idx - channels + 0] : 0) <<  0)
+                        | ((uint64_t)((i >= channels) ? final_output[idx - channels + 1] : 0) << 16)
+                        | ((uint64_t)((i >= channels) ? final_output[idx - channels + 2] : 0) << 32);
+
+                    b_64 =
+                          ((uint64_t)((row > 0) ? final_output[idx - width * channels + 0] : 0) <<  0)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 1] : 0) << 16)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 2] : 0) << 32);
+
+                    uint64_t res = raw_64 + ((a_64 + b_64) >> 1);
+
+                    final_output[idx+0] = (uint8_t)(res);
+                    final_output[idx+1] = (uint8_t)(res >> 16);
+                    final_output[idx+2] = (uint8_t)(res >> 32);
+
+                    idx += channels;
+                }
+                break;
+            case 4:
+                for (int i = 0; i < width * channels; i += channels) {
+                    raw_64 =
+                          ((uint64_t)output[row_start + 1 + i + 0] <<  0)
+                        | ((uint64_t)output[row_start + 1 + i + 1] << 16)
+                        | ((uint64_t)output[row_start + 1 + i + 2] << 32);
+
+                    a_64 =
+                          ((uint64_t)((i >= channels) ? final_output[idx - channels + 0] : 0) <<  0)
+                        | ((uint64_t)((i >= channels) ? final_output[idx - channels + 1] : 0) << 16)
+                        | ((uint64_t)((i >= channels) ? final_output[idx - channels + 2] : 0) << 32);
+
+                    b_64 =
+                          ((uint64_t)((row > 0) ? final_output[idx - width * channels + 0] : 0) <<  0)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 1] : 0) << 16)
+                        | ((uint64_t)((row > 0) ? final_output[idx - width * channels + 2] : 0) << 32);
+
+                    c_64 =
+                          ((uint64_t)((row > 0 && i >= channels) ? final_output[idx - width * channels - channels + 0] : 0) <<  0)
+                        | ((uint64_t)((row > 0 && i >= channels) ? final_output[idx - width * channels - channels + 1] : 0) << 16)
+                        | ((uint64_t)((row > 0 && i >= channels) ? final_output[idx - width * channels - channels + 2] : 0) << 32);
+
+                    __m128i res = paeth_simd__m128i(a_64, b_64, c_64, raw_64);
+                    int16_t values[4];
+                    _mm_storeu_si128((__m128i *)values, res);
+
+                    final_output[idx+0] = (uint8_t)(values[0]);
+                    final_output[idx+1] = (uint8_t)(values[1]);
+                    final_output[idx+2] = (uint8_t)(values[2]);
+
+                    idx += channels;
+                }
+                break;
+            default:
+                gj_set_error("Unknown filter %u\n", filter);
+                return NULL;
+        }
+    }
 }
 
 uint8_t *png_processIDAT(void *data, uint32_t length,
@@ -661,77 +786,17 @@ uint8_t *png_processIDAT(void *data, uint32_t length,
     }
 
     /* ---- PNG FILTERING ---- */
-    int row_bytes = width * channels + 1;
     uint8_t *final_output = malloc(width * height * channels);
     if (!final_output) {
         free(output);
         return NULL;
     }
 
-    int idx = 0;
-
-    for (int row = 0; row < height; row++) {
-        int row_start = row * row_bytes;
-        uint8_t filter = output[row_start];
-
-        uint64_t raws_64 = 0;
-        uint64_t a_64 = 0;
-        uint64_t b_64 = 0;
-        uint64_t c_64 = 0;
-
-        for (int i = 0; i < width * channels; i++) {
-            uint8_t raw = output[row_start + 1 + i];
-            uint8_t recon;
-
-            uint8_t left = (i >= channels) ? final_output[idx - channels] : 0;
-            uint8_t up   = (row > 0)  ? final_output[idx - width * channels] : 0;
-            uint8_t up_left =
-                (row > 0 && i >= channels) ? final_output[idx - width * channels - channels] : 0;
-            int case4 = 0;
-c:
-            switch (filter) {
-                case 0: recon = raw; break;
-                case 1: recon = raw + left; break;
-                case 2: recon = raw + up; break;
-                case 3: recon = raw + ((left + up) >> 1); break;
-                case 4: 
-                        case4 = 1;
-                        uint8_t ch = i % channels;
-                        raws_64 = (raws_64 << 16) | raw;
-                        a_64    = (a_64    << 16) | left;
-                        b_64    = (b_64    << 16) | up;
-                        c_64    = (c_64    << 16) | up_left;
-                        if (ch == channels - 1) {
-                            __m128i res = paeth_simd__m128i(a_64, b_64, c_64);
-                            int16_t values[4];
-                            _mm_storeu_si128((__m128i *)values, res);
-
-                            if (channels == 4) {
-                                final_output[idx-3] = ((uint8_t)(raws_64 >> 0))  + values[0];
-                                final_output[idx-2] = ((uint8_t)(raws_64 >> 16)) + values[1];
-                                final_output[idx-1] = ((uint8_t)(raws_64 >> 32)) + values[2];
-                                final_output[idx]   = ((uint8_t)(raws_64 >> 48)) + values[3];
-                            } else if (channels == 3) {
-                                final_output[idx-2] = ((uint8_t)(raws_64 >> 0))  + values[0];
-                                final_output[idx-1] = ((uint8_t)(raws_64 >> 16)) + values[1];
-                                final_output[idx]   = ((uint8_t)(raws_64 >> 32)) + values[2];
-                            }
-                        }
-                        break;
-                default:
-                    gj_set_error("Unknown filter %u\n", filter);
-                    free(output);
-                    free(final_output);
-                    return NULL;
-            }
-
-            if (!case4)
-                final_output[idx++] = recon;
-            else
-                idx++;
-        }
+    if (!png_filter(width, height, channels, final_output, output)) {
+        free(output);
+        free(final_output);
+        return NULL;
     }
-
     free(output);
 
     *out_size = width * height * channels;

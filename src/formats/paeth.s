@@ -2,7 +2,7 @@
 .global paeth_predictor_asm
 .global paeth_simd__m128i
 
-# __m128i paeth_simd__m128i(uint64_t a, uint64_t b, uint64_t c);
+# __m128i paeth_simd__m128i(uint64_t a, uint64_t b, uint64_t c, uint64_t raw);
 paeth_simd__m128i:
     movq %rdi, %xmm0
     movq %rsi, %xmm1
@@ -36,10 +36,9 @@ paeth_simd__m128i:
 
     pcmpeqw %xmm8, %xmm8       # xmm8 = 0xffff...
     pxor    %xmm8, %xmm6       # xmm6 = ~(HI > THRESH)
-                                #       = HI <= THRESH
+                               #       = HI <= THRESH
 
     # t0 = (mask & LO) | (~mask & C)
-
     movdqa  %xmm6, %xmm7
     pand    %xmm3, %xmm7       # xmm7 = mask & LO
 
@@ -62,5 +61,8 @@ paeth_simd__m128i:
     pandn   %xmm7, %xmm0       # (~mask) & T0
 
     por     %xmm8, %xmm0       # result
+
+    movq    %rcx,  %xmm1
+    paddw   %xmm1, %xmm0       # raw + result
 
     ret
