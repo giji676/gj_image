@@ -2,9 +2,6 @@
 CC  = gcc
 ASM = gcc
 
-# Output library
-NAME = libgj_image.a
-
 # Flags
 CFLAGS   = -Wall -Wextra -Iinclude -Isrc -MMD -MP -O3
 ASMFLAGS = -x assembler -c
@@ -17,6 +14,9 @@ BUILD_DIR = build
 TEST_DIR = src/test
 TEST_SRC = $(TEST_DIR)/test.c
 TEST_BIN = test
+
+# Output library
+NAME = $(BUILD_DIR)/libgj_image.a
 
 # Find all source files (internal only)
 SRC_C   = $(shell find $(SRC_DIR) -name "*.c")
@@ -39,6 +39,7 @@ test: $(NAME)
 
 # Build static library
 $(NAME): $(OBJ)
+	@mkdir -p $(dir $@)
 	ar rcs $@ $^
 
 # Compile objects
